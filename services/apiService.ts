@@ -1,4 +1,3 @@
-
 import { GoogleGenAI, GenerateContentResponse } from "@google/genai";
 import { ProviderId, ApiResponse, ApiServiceParams, ModelType } from '../types';
 import { PROVIDERS } from '../constants';
@@ -67,9 +66,12 @@ const callOpenRouterApi = async ({ apiKey, model, prompt, imageBase64 }: ApiServ
     }
 };
 
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
 const callNovitaApi = async ({ apiKey, model, prompt }: ApiServiceParams): Promise<ApiResponse> => {
      try {
-        const res = await fetch("https://api.novita.ai/v3/text-to-image", {
+        // Step 1: Initiate the task
+        const initRes = await fetch("https://api.novita.ai/v3/text-to-image", {
             method: "POST",
             headers: {
                 "Authorization": `Bearer ${apiKey}`,
@@ -84,15 +86,51 @@ const callNovitaApi = async ({ apiKey, model, prompt }: ApiServiceParams): Promi
                 n_iter: 1,
             }),
         });
-        if (!res.ok) {
-             const errorData = await res.json();
-             throw new Error(`Novita Error: ${errorData.reason || res.statusText}`);
+        if (!initRes.ok) {
+             const errorData = await initRes.json();
+             throw new Error(`Novita Error (init): ${errorData.reason || initRes.statusText}`);
         }
-        const data = await res.json();
-        if (data.images && data.images.length > 0) {
-            return { imageUrl: data.images[0].image_url, isLoading: false };
+        const initData = await initRes.json();
+        const taskId = initData.task_id;
+        if (!taskId) {
+            throw new Error("Novita API did not return a task ID.");
         }
-        throw new Error("Novita API did not return any images.");
+
+        // Step 2: Poll for the result
+        const startTime = Date.now();
+        const timeout = 60000; // 60 seconds timeout
+
+        while (Date.now() - startTime < timeout) {
+            await sleep(3000); // Poll every 3 seconds
+
+            const pollRes = await fetch(`https://api.novita.ai/v3/tasks/${taskId}`, {
+                method: "GET",
+                headers: { "Authorization": `Bearer ${apiKey}` },
+            });
+            
+            if (!pollRes.ok) {
+                console.warn(`Novita polling failed with status: ${pollRes.statusText}`);
+                continue; // Continue polling even if one request fails
+            }
+
+            const pollData = await pollRes.json();
+            const taskStatus = pollData.task?.status;
+
+            if (taskStatus === "SUCCESS") {
+                if (pollData.task.images && pollData.task.images.length > 0) {
+                    return { imageUrl: pollData.task.images[0].image_url, isLoading: false };
+                }
+                throw new Error("Novita task succeeded but returned no images.");
+            }
+
+            if (taskStatus === "FAILED") {
+                 throw new Error(`Novita task failed. Reason: ${pollData.task.failed_reason || 'Unknown'}`);
+            }
+             
+            // If status is QUEUED or PROCESSING, the loop will continue.
+        }
+
+        throw new Error("Novita task timed out after 60 seconds.");
 
      } catch(e: any) {
         console.error("Novita AI API Error:", e);
@@ -106,14 +144,21 @@ const callFireworksApi = async ({ apiKey, model, prompt, imageBase64 }: ApiServi
 
     try {
         if (providerModel.type === ModelType.IMAGE) {
-            const res = await fetch("https://api.fireworks.ai/inference/v1/image_generation/accounts/fireworks/models/stable-diffusion-xl-base-1.0", {
+            const res = await fetch(`https://api.fireworks.ai/inference/v1/image_generation/${model}`, {
                 method: "POST",
                 headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
                 body: JSON.stringify({ prompt, n: 1, size:"1024x1024", response_format: "b64_json" }),
             });
-            if (!res.ok) throw new Error(`Fireworks Image Gen Error: ${res.statusText}`);
+            if (!res.ok) {
+                const errorText = await res.text();
+                throw new Error(`Fireworks Image Gen Error: ${res.statusText} - ${errorText}`);
+            }
             const data = await res.json();
+            if (!data[0] || !data[0].b64_json) {
+                throw new Error("Fireworks API returned an invalid response for the image.");
+            }
             return { imageUrl: `data:image/png;base64,${data[0].b64_json}`, isLoading: false };
+
         } else { // TEXT or VISION
              const messages: any[] = [{ role: "user", content: [{ type: "text", text: prompt }] }];
              if (imageBase64) {
