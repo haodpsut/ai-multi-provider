@@ -1,0 +1,5 @@
+{
+  "name": "AI Provider Comparator",
+  "description": "An application to compare text and image generation results from multiple AI providers like Gemini, OpenRouter, Novita AI, and Fireworks AI side-by-side.",
+  "requestFramePermissions": []
+}
